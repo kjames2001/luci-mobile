@@ -81,4 +81,44 @@ abstract class IApiService {
     required String command,
     BuildContext? context,
   });
+
+  /// Scans for nearby wireless networks using a given radio device (e.g., wlan0).
+  /// Returns the raw scan results from iwinfo.scan.
+  Future<List<Map<String, dynamic>>> scanWirelessNetworks({
+    required String ipAddress,
+    required String sysauth,
+    required bool useHttps,
+    required String device,
+    BuildContext? context,
+  });
+
+  /// Adds a new wifi-iface section via UCI to connect to a network as a station.
+  Future<dynamic> uciAdd(
+    String ipAddress,
+    String sysauth,
+    bool useHttps, {
+    required String config,
+    required String type,
+    required Map<String, dynamic> values,
+    BuildContext? context,
+  });
+
+  /// Deletes a UCI section (e.g., to remove a wifi-iface).
+  Future<dynamic> uciDelete(
+    String ipAddress,
+    String sysauth,
+    bool useHttps, {
+    required String config,
+    required String section,
+    BuildContext? context,
+  });
+
+  /// Retrieves the full UCI config for a given config name.
+  Future<dynamic> uciGetAll(
+    String ipAddress,
+    String sysauth,
+    bool useHttps, {
+    required String config,
+    BuildContext? context,
+  });
 }

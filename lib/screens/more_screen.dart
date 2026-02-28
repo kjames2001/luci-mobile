@@ -11,6 +11,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:luci_mobile/config/app_config.dart';
 import 'package:luci_mobile/screens/manage_routers_screen.dart';
+import 'package:luci_mobile/screens/wifi_scan_screen.dart';
 import 'package:luci_mobile/utils/http_client_manager.dart';
 import 'package:luci_mobile/state/app_state.dart';
 
@@ -309,6 +310,20 @@ class _MoreScreenState extends ConsumerState<MoreScreen> {
                 );
                 return _MoreScreenSection(
                   tiles: [
+                    _buildMoreTile(
+                      context,
+                      icon: Icons.wifi_find,
+                      iconColor: Theme.of(context).colorScheme.primary,
+                      title: 'WiFi Scanner',
+                      subtitle: 'Scan and connect to wireless networks',
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (context) => const WifiScanScreen(),
+                          ),
+                        );
+                      },
+                    ),
                     _buildMoreTile(
                       context,
                       icon: Icons.restart_alt,

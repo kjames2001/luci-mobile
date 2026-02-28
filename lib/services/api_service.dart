@@ -667,4 +667,98 @@ class RealApiService implements IApiService {
       context: context,
     );
   }
+
+  @override
+  Future<List<Map<String, dynamic>>> scanWirelessNetworks({
+    required String ipAddress,
+    required String sysauth,
+    required bool useHttps,
+    required String device,
+    BuildContext? context,
+  }) async {
+    try {
+      final result = await callWithContext(
+        ipAddress,
+        sysauth,
+        useHttps,
+        object: 'iwinfo',
+        method: 'scan',
+        params: {'device': device},
+        context: context,
+      );
+      // Handle LuCI RPC format: [status, data]
+      if (result is List && result.length > 1 && result[0] == 0) {
+        final data = result[1];
+        if (data is Map && data['results'] is List) {
+          return (data['results'] as List)
+              .whereType<Map<String, dynamic>>()
+              .toList();
+        }
+      }
+      return [];
+    } catch (e, stack) {
+      Logger.exception('Failed to scan wireless networks', e, stack);
+      return [];
+    }
+  }
+
+  @override
+  Future<dynamic> uciAdd(
+    String ipAddress,
+    String sysauth,
+    bool useHttps, {
+    required String config,
+    required String type,
+    required Map<String, dynamic> values,
+    BuildContext? context,
+  }) async {
+    return await callWithContext(
+      ipAddress,
+      sysauth,
+      useHttps,
+      object: 'uci',
+      method: 'add',
+      params: {'config': config, 'type': type, 'values': values},
+      context: context,
+    );
+  }
+
+  @override
+  Future<dynamic> uciDelete(
+    String ipAddress,
+    String sysauth,
+    bool useHttps, {
+    required String config,
+    required String section,
+    BuildContext? context,
+  }) async {
+    return await callWithContext(
+      ipAddress,
+      sysauth,
+      useHttps,
+      object: 'uci',
+      method: 'delete',
+      params: {'config': config, 'section': section},
+      context: context,
+    );
+  }
+
+  @override
+  Future<dynamic> uciGetAll(
+    String ipAddress,
+    String sysauth,
+    bool useHttps, {
+    required String config,
+    BuildContext? context,
+  }) async {
+    return await callWithContext(
+      ipAddress,
+      sysauth,
+      useHttps,
+      object: 'uci',
+      method: 'get',
+      params: {'config': config},
+      context: context,
+    );
+  }
 }
