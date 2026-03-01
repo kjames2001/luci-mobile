@@ -817,15 +817,24 @@ class RealApiService implements IApiService {
     required String config,
     required String type,
     required Map<String, dynamic> values,
+    String? name,
     BuildContext? context,
   }) async {
+    final params = <String, dynamic>{
+      'config': config,
+      'type': type,
+      'values': values,
+    };
+    if (name != null) {
+      params['name'] = name;
+    }
     return await callWithContext(
       ipAddress,
       sysauth,
       useHttps,
       object: 'uci',
       method: 'add',
-      params: {'config': config, 'type': type, 'values': values},
+      params: params,
       context: context,
     );
   }
