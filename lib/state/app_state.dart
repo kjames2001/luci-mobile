@@ -1199,17 +1199,14 @@ class AppState extends ChangeNotifier {
   /// since UCI changes are already committed at this point.
   Future<void> _wifiReload({
     BuildContext? context,
-    String? radioName,
     int delaySeconds = 4,
   }) async {
     try {
-      final command =
-          radioName != null ? 'wifi reload $radioName' : 'wifi reload';
       await _apiService!.systemExec(
         _authService!.ipAddress!,
         _authService!.sysauth!,
         _authService!.useHttps,
-        command: command,
+        command: 'wifi reload',
         context: context?.mounted == true ? context : null,
       );
     } catch (e) {
@@ -1403,7 +1400,7 @@ class AppState extends ChangeNotifier {
     return devices;
   }
 
-  /// Restarts a wireless radio by running `wifi reload`.
+  /// Restarts wireless by running `wifi reload`.
   Future<bool> restartWirelessRadio(
     String radioName, {
     BuildContext? context,
@@ -1419,11 +1416,12 @@ class AppState extends ChangeNotifier {
     }
 
     try {
+      // Use 'wifi reload' (all radios) — per-radio syntax isn't supported on all versions
       await _apiService!.systemExec(
         _authService!.ipAddress!,
         _authService!.sysauth!,
         _authService!.useHttps,
-        command: 'wifi reload $radioName',
+        command: 'wifi reload',
         context: context,
       );
 
