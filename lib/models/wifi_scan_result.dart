@@ -22,17 +22,34 @@ class WifiScanResult {
 
   factory WifiScanResult.fromJson(Map<String, dynamic> json) {
     return WifiScanResult(
-      ssid: json['ssid'] as String? ?? '',
-      bssid: json['bssid'] as String? ?? '',
-      mode: json['mode'] as String? ?? 'Unknown',
-      channel: json['channel'] as int? ?? 0,
-      signal: json['signal'] as int? ?? -100,
-      quality: json['quality'] as int? ?? 0,
-      qualityMax: json['quality_max'] as int? ?? 100,
+      ssid: _safeString(json['ssid'], ''),
+      bssid: _safeString(json['bssid'], ''),
+      mode: _safeString(json['mode'], 'Unknown'),
+      channel: _safeInt(json['channel'], 0),
+      signal: _safeInt(json['signal'], -100),
+      quality: _safeInt(json['quality'], 0),
+      qualityMax: _safeInt(json['quality_max'], 100),
       encryption: WifiEncryption.fromJson(
-        json['encryption'] as Map<String, dynamic>? ?? {},
+        json['encryption'] is Map<String, dynamic>
+            ? json['encryption']
+            : <String, dynamic>{},
       ),
     );
+  }
+
+  /// Safely extract an int from a dynamic value (could be int, double, String, List, null).
+  static int _safeInt(dynamic value, int defaultValue) {
+    if (value is int) return value;
+    if (value is double) return value.round();
+    if (value is String) return int.tryParse(value) ?? defaultValue;
+    return defaultValue;
+  }
+
+  /// Safely extract a String from a dynamic value.
+  static String _safeString(dynamic value, String defaultValue) {
+    if (value is String) return value;
+    if (value == null) return defaultValue;
+    return value.toString();
   }
 
   /// Signal quality as a percentage (0-100).
@@ -90,10 +107,10 @@ class WifiEncryption {
 
   factory WifiEncryption.fromJson(Map<String, dynamic> json) {
     return WifiEncryption(
-      enabled: json['enabled'] as bool? ?? false,
-      description: json['description'] as String? ?? 'None',
-      wep: json['wep'] as bool? ?? false,
-      wpa: json['wpa'] as int? ?? 0,
+      enabled: json['enabled'] == true,
+      description: WifiScanResult._safeString(json['description'], 'None'),
+      wep: json['wep'] == true,
+      wpa: WifiScanResult._safeInt(json['wpa'], 0),
       authSuites: _toStringList(json['auth_suites']),
       pairCiphers: _toStringList(json['pair_ciphers']),
       groupCiphers: _toStringList(json['group_ciphers']),
