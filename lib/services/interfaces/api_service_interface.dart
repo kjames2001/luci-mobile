@@ -95,7 +95,8 @@ abstract class IApiService {
   /// Cancel any ongoing wireless network scan.
   void cancelScan() {}
 
-  /// Adds a new wifi-iface section via UCI to connect to a network as a station.
+  /// Adds a new UCI section. If [name] is provided, creates a named section;
+  /// otherwise creates an anonymous section.
   Future<dynamic> uciAdd(
     String ipAddress,
     String sysauth,
@@ -103,6 +104,7 @@ abstract class IApiService {
     required String config,
     required String type,
     required Map<String, dynamic> values,
+    String? name,
     BuildContext? context,
   });
 
