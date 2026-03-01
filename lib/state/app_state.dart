@@ -1194,31 +1194,83 @@ class AppState extends ChangeNotifier {
     );
   }
 
-  /// Helper: runs wifi reload and refreshes dashboard.
-  /// Never throws — wifi reload failures are logged but don't fail the operation
-  /// since UCI changes are already committed at this point.
-  Future<void> _wifiReload({
+  /// Restarts a specific radio via UCI disable/enable cycle.
+  /// This is more reliable than `wifi reload` which doesn't work on all routers.
+  /// Never throws — failures are logged but don't fail the calling operation.
+  Future<void> _restartRadioViaUci(
+    String radioName, {
     BuildContext? context,
-    int delaySeconds = 4,
+    int delaySeconds = 5,
   }) async {
-    try {
-      await _apiService!.systemExec(
-        _authService!.ipAddress!,
-        _authService!.sysauth!,
-        _authService!.useHttps,
-        command: 'wifi reload',
-        context: context?.mounted == true ? context : null,
-      );
-    } catch (e) {
-      Logger.warning('wifi reload failed (changes still committed via UCI): $e');
-    }
+    final ip = _authService!.ipAddress!;
+    final auth = _authService!.sysauth!;
+    final https = _authService!.useHttps;
+    final safeCtx = context?.mounted == true ? context : null;
 
-    await Future.delayed(Duration(seconds: delaySeconds));
+    try {
+      // Disable the radio
+      await _apiService!.uciSet(
+        ip, auth, https,
+        config: 'wireless',
+        section: radioName,
+        values: {'disabled': '1'},
+        context: safeCtx,
+      );
+      await _apiService!.uciCommit(
+        ip, auth, https,
+        config: 'wireless',
+        context: safeCtx,
+      );
+
+      await Future.delayed(Duration(seconds: delaySeconds));
+
+      // Re-enable the radio
+      await _apiService!.uciSet(
+        ip, auth, https,
+        config: 'wireless',
+        section: radioName,
+        values: {'disabled': '0'},
+        context: safeCtx,
+      );
+      await _apiService!.uciCommit(
+        ip, auth, https,
+        config: 'wireless',
+        context: safeCtx,
+      );
+
+      await Future.delayed(Duration(seconds: delaySeconds));
+    } catch (e) {
+      Logger.warning('Radio restart via UCI failed for $radioName: $e');
+    }
 
     try {
       await fetchDashboardData();
-    } catch (_) {
-      // Dashboard refresh may fail while wifi is restarting — that's OK
+    } catch (_) {}
+  }
+
+  /// Helper: restarts all known radios via UCI disable/enable cycle.
+  /// Used after operations that need wifi to reload (toggle, modify, delete).
+  /// Never throws.
+  Future<void> _wifiReload({
+    BuildContext? context,
+  }) async {
+    // Get list of radios from dashboard data
+    final wirelessData =
+        _dashboardData?['wireless'] as Map<String, dynamic>? ?? {};
+    final radios = wirelessData.keys.toList();
+
+    if (radios.isEmpty) {
+      Logger.warning('_wifiReload: no radios found in dashboard data');
+      await Future.delayed(const Duration(seconds: 4));
+      try {
+        await fetchDashboardData();
+      } catch (_) {}
+      return;
+    }
+
+    // Cycle all radios
+    for (final radio in radios) {
+      await _restartRadioViaUci(radio, context: context, delaySeconds: 3);
     }
   }
 
@@ -1259,8 +1311,11 @@ class AppState extends ChangeNotifier {
         context: context?.mounted == true ? context : null,
       );
 
-      // 3. Reload wifi to apply changes
-      await _wifiReload(context: context);
+      // 3. Wait and refresh — don't cycle radios as that would undo the toggle
+      await Future.delayed(const Duration(seconds: 4));
+      try {
+        await fetchDashboardData();
+      } catch (_) {}
 
       return true;
     } catch (e) {
@@ -1400,7 +1455,7 @@ class AppState extends ChangeNotifier {
     return devices;
   }
 
-  /// Restarts wireless by running `wifi reload`.
+  /// Restarts a wireless radio via UCI disable/enable cycle.
   Future<bool> restartWirelessRadio(
     String radioName, {
     BuildContext? context,
@@ -1416,20 +1471,8 @@ class AppState extends ChangeNotifier {
     }
 
     try {
-      // Use 'wifi reload' (all radios) — per-radio syntax isn't supported on all versions
-      await _apiService!.systemExec(
-        _authService!.ipAddress!,
-        _authService!.sysauth!,
-        _authService!.useHttps,
-        command: 'wifi reload',
-        context: context,
-      );
-
-      await Future.delayed(const Duration(seconds: 5));
-
-      try {
-        await fetchDashboardData();
-      } catch (_) {}
+      Logger.info('Restarting radio $radioName via UCI cycle');
+      await _restartRadioViaUci(radioName, context: context);
       return true;
     } catch (e, stack) {
       Logger.exception('Failed to restart radio $radioName', e, stack);
@@ -1469,6 +1512,28 @@ class AppState extends ChangeNotifier {
       final auth = _authService!.sysauth!;
       final https = _authService!.useHttps;
 
+      // Find next available wifinet# name to avoid anonymous sections
+      String sectionName = 'wifinet0';
+      try {
+        final uciResult = await _apiService!.uciGetAll(
+          ip, auth, https,
+          config: 'wireless',
+          context: context,
+        );
+        if (uciResult is List && uciResult.length > 1 && uciResult[1] is Map) {
+          final sections = (uciResult[1] as Map).keys.toSet();
+          int idx = 0;
+          while (sections.contains('wifinet$idx')) {
+            idx++;
+          }
+          sectionName = 'wifinet$idx';
+        }
+      } catch (e) {
+        Logger.warning('Could not query existing sections, using $sectionName: $e');
+      }
+
+      Logger.info('Creating named wifi-iface section: $sectionName');
+
       // Build the values for the new wifi-iface
       final values = <String, dynamic>{
         'device': radioDevice,
@@ -1478,17 +1543,17 @@ class AppState extends ChangeNotifier {
         'encryption': encryption,
       };
       if (password.isNotEmpty) {
-        // WPA3/SAE uses 'key', WPA/WPA2 also uses 'key'
         values['key'] = password;
       }
 
-      // 1. Add a new wifi-iface section
+      // 1. Add a named wifi-iface section
       final addResult = await _apiService!.uciAdd(
         ip,
         auth,
         https,
         config: 'wireless',
         type: 'wifi-iface',
+        name: sectionName,
         values: values,
         context: context,
       );
@@ -1504,8 +1569,8 @@ class AppState extends ChangeNotifier {
         context: context?.mounted == true ? context : null,
       );
 
-      // 3. Reload wifi to apply changes
-      await _wifiReload(context: context);
+      // 3. Restart radio to apply changes
+      await _restartRadioViaUci(radioDevice, context: context);
 
       return true;
     } catch (e, stack) {
@@ -1565,8 +1630,11 @@ class AppState extends ChangeNotifier {
       return false;
     }
 
-    // UCI changes are committed — reload wifi in background (best-effort)
-    await _wifiReload(context: context);
+    // UCI changes are committed — wait and refresh (don't cycle radios for toggle)
+    await Future.delayed(const Duration(seconds: 4));
+    try {
+      await fetchDashboardData();
+    } catch (_) {}
     Logger.info('Toggle interface $uciSection complete');
     return true;
   }
