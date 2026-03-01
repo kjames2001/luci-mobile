@@ -1194,6 +1194,37 @@ class AppState extends ChangeNotifier {
     );
   }
 
+  /// Helper: runs wifi reload and refreshes dashboard.
+  /// Never throws — wifi reload failures are logged but don't fail the operation
+  /// since UCI changes are already committed at this point.
+  Future<void> _wifiReload({
+    BuildContext? context,
+    String? radioName,
+    int delaySeconds = 4,
+  }) async {
+    try {
+      final command =
+          radioName != null ? 'wifi reload $radioName' : 'wifi reload';
+      await _apiService!.systemExec(
+        _authService!.ipAddress!,
+        _authService!.sysauth!,
+        _authService!.useHttps,
+        command: command,
+        context: context?.mounted == true ? context : null,
+      );
+    } catch (e) {
+      Logger.warning('wifi reload failed (changes still committed via UCI): $e');
+    }
+
+    await Future.delayed(Duration(seconds: delaySeconds));
+
+    try {
+      await fetchDashboardData();
+    } catch (_) {
+      // Dashboard refresh may fail while wifi is restarting — that's OK
+    }
+  }
+
   Future<bool> setWirelessRadioState(
     String device,
     bool enabled, {
@@ -1232,16 +1263,7 @@ class AppState extends ChangeNotifier {
       );
 
       // 3. Reload wifi to apply changes
-      await _apiService!.systemExec(
-        _authService!.ipAddress!,
-        _authService!.sysauth!,
-        _authService!.useHttps,
-        command: 'wifi reload',
-        context: context?.mounted == true ? context : null,
-      );
-
-      // Refresh dashboard data to reflect the change
-      await fetchDashboardData();
+      await _wifiReload(context: context);
 
       return true;
     } catch (e) {
@@ -1249,6 +1271,11 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       return false;
     }
+  }
+
+  /// Cancel any ongoing wireless network scan.
+  void cancelWirelessScan() {
+    _apiService?.cancelScan();
   }
 
   /// Scans for nearby wireless networks on a given radio interface.
@@ -1302,31 +1329,95 @@ class AppState extends ChangeNotifier {
     wirelessData.forEach((radioName, radioData) {
       if (radioData is Map<String, dynamic>) {
         final interfaces = radioData['interfaces'] as List<dynamic>?;
+
+        // Determine band from frequency/channel
+        final freq = radioData['frequency'];
+        final channel = radioData['channel'];
+        String band = '';
+        if (freq is int) {
+          band = freq >= 5000 ? '5 GHz' : freq >= 4000 ? '4 GHz' : '2.4 GHz';
+        } else if (channel is int) {
+          band = channel >= 36 ? '5 GHz' : '2.4 GHz';
+        }
+
         if (interfaces != null && interfaces.isNotEmpty) {
+          // Find the best interface for scanning:
+          // Prefer an AP interface, fall back to any active interface
+          String? bestIfname;
+          String bestSsid = radioName;
           for (final iface in interfaces) {
             final ifname = iface['ifname'] as String?;
-            if (ifname != null) {
-              final config = iface['config'] as Map<String, dynamic>? ?? {};
-              final iwinfo = iface['iwinfo'] as Map<String, dynamic>? ?? {};
-              devices.add({
-                'ifname': ifname,
-                'radioName': radioName,
-                'ssid': (iwinfo['ssid'] ?? config['ssid'] ?? radioName)
-                    .toString(),
-              });
+            if (ifname == null) continue;
+            final config = iface['config'] as Map<String, dynamic>? ?? {};
+            final iwinfo = iface['iwinfo'] as Map<String, dynamic>? ?? {};
+            final mode = config['mode']?.toString() ?? '';
+            final ssid =
+                (iwinfo['ssid'] ?? config['ssid'] ?? '').toString();
+
+            if (bestIfname == null || mode == 'ap') {
+              bestIfname = ifname;
+              if (ssid.isNotEmpty) bestSsid = ssid;
             }
+            // If we found an AP interface, stop looking
+            if (mode == 'ap') break;
           }
+
+          devices.add({
+            'ifname': bestIfname ?? radioName,
+            'radioName': radioName,
+            'ssid': bestSsid,
+            'band': band,
+          });
         } else {
           // Radio exists but has no interfaces - still usable for scanning
           devices.add({
             'ifname': radioName,
             'radioName': radioName,
             'ssid': radioName,
+            'band': band,
           });
         }
       }
     });
     return devices;
+  }
+
+  /// Restarts a wireless radio by running `wifi reload`.
+  Future<bool> restartWirelessRadio(
+    String radioName, {
+    BuildContext? context,
+  }) async {
+    if (_reviewerModeEnabled) {
+      await Future.delayed(const Duration(seconds: 2));
+      await fetchDashboardData();
+      return true;
+    }
+
+    if (_authService?.sysauth == null || _authService?.ipAddress == null) {
+      return false;
+    }
+
+    try {
+      await _apiService!.systemExec(
+        _authService!.ipAddress!,
+        _authService!.sysauth!,
+        _authService!.useHttps,
+        command: 'wifi reload $radioName',
+        context: context,
+      );
+
+      await Future.delayed(const Duration(seconds: 5));
+
+      try {
+        await fetchDashboardData();
+      } catch (_) {}
+      return true;
+    } catch (e, stack) {
+      Logger.exception('Failed to restart radio $radioName', e, stack);
+      _dashboardError = 'Failed to restart radio: $e';
+      notifyListeners();
+      return false;
+    }
   }
 
   /// Connects to a wireless network by creating a new wifi-iface in station mode.
@@ -1395,17 +1486,7 @@ class AppState extends ChangeNotifier {
       );
 
       // 3. Reload wifi to apply changes
-      await _apiService!.systemExec(
-        ip,
-        auth,
-        https,
-        command: 'wifi reload',
-        context: context?.mounted == true ? context : null,
-      );
-
-      // Wait a moment for the wifi to apply, then refresh
-      await Future.delayed(const Duration(seconds: 3));
-      await fetchDashboardData();
+      await _wifiReload(context: context);
 
       return true;
     } catch (e, stack) {
@@ -1454,16 +1535,8 @@ class AppState extends ChangeNotifier {
         context: context?.mounted == true ? context : null,
       );
 
-      await _apiService!.systemExec(
-        _authService!.ipAddress!,
-        _authService!.sysauth!,
-        _authService!.useHttps,
-        command: 'wifi reload',
-        context: context?.mounted == true ? context : null,
-      );
+      await _wifiReload(context: context);
 
-      await Future.delayed(const Duration(seconds: 2));
-      await fetchDashboardData();
       return true;
     } catch (e, stack) {
       Logger.exception('Failed to toggle wireless interface', e, stack);
@@ -1511,16 +1584,8 @@ class AppState extends ChangeNotifier {
         context: context?.mounted == true ? context : null,
       );
 
-      await _apiService!.systemExec(
-        _authService!.ipAddress!,
-        _authService!.sysauth!,
-        _authService!.useHttps,
-        command: 'wifi reload',
-        context: context?.mounted == true ? context : null,
-      );
+      await _wifiReload(context: context);
 
-      await Future.delayed(const Duration(seconds: 2));
-      await fetchDashboardData();
       return true;
     } catch (e, stack) {
       Logger.exception('Failed to modify wireless interface', e, stack);
@@ -1565,16 +1630,8 @@ class AppState extends ChangeNotifier {
         context: context?.mounted == true ? context : null,
       );
 
-      await _apiService!.systemExec(
-        _authService!.ipAddress!,
-        _authService!.sysauth!,
-        _authService!.useHttps,
-        command: 'wifi reload',
-        context: context?.mounted == true ? context : null,
-      );
+      await _wifiReload(context: context);
 
-      await Future.delayed(const Duration(seconds: 2));
-      await fetchDashboardData();
       return true;
     } catch (e, stack) {
       Logger.exception('Failed to delete wireless interface', e, stack);
