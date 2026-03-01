@@ -295,6 +295,8 @@ class RealApiService implements IApiService {
     required String method,
     Map<String, dynamic>? params,
     BuildContext? context,
+    Duration? receiveTimeout,
+    CancelToken? cancelToken,
   }) async {
     final url = _buildUrl(ipAddress, useHttps, '/cgi-bin/luci/admin/ubus');
     final client = _createHttpClient(useHttps, ipAddress, context: context);
@@ -310,8 +312,10 @@ class RealApiService implements IApiService {
       final response = await client.post(
         url.toString(),
         data: jsonEncode(rpcPayload),
+        cancelToken: cancelToken,
         options: Options(
           headers: {'Content-Type': 'application/json'},
+          receiveTimeout: receiveTimeout,
         ),
       );
 
@@ -657,15 +661,47 @@ class RealApiService implements IApiService {
     required String command,
     BuildContext? context,
   }) async {
+    // OpenWrt ubus uses 'file' object with 'exec' method, not 'system.exec'.
+    // file.exec takes {"command": "/path/to/bin", "params": ["arg1", "arg2"]}
+    final parts = command.trim().split(RegExp(r'\s+'));
+    String execCommand = parts.first;
+    final execParams = parts.length > 1 ? parts.sublist(1) : <String>[];
+
+    // Resolve common commands to their full paths
+    const commandPaths = {
+      'wifi': '/sbin/wifi',
+      'reboot': '/sbin/reboot',
+      'ifup': '/sbin/ifup',
+      'ifdown': '/sbin/ifdown',
+      'service': '/sbin/service',
+      'uci': '/sbin/uci',
+    };
+    if (!execCommand.startsWith('/')) {
+      execCommand = commandPaths[execCommand] ?? '/usr/bin/$execCommand';
+    }
+
     return await callWithContext(
       ipAddress,
       sysauth,
       useHttps,
-      object: 'system',
+      object: 'file',
       method: 'exec',
-      params: {'command': command},
+      params: {
+        'command': execCommand,
+        'params': execParams,
+      },
       context: context,
     );
+  }
+
+  // Cancel token for ongoing scan operations
+  CancelToken? _scanCancelToken;
+
+  /// Cancel any ongoing wireless scan
+  @override
+  void cancelScan() {
+    _scanCancelToken?.cancel('Scan cancelled by user');
+    _scanCancelToken = null;
   }
 
   @override
@@ -676,6 +712,10 @@ class RealApiService implements IApiService {
     required String device,
     BuildContext? context,
   }) async {
+    // Cancel any previous scan
+    cancelScan();
+    _scanCancelToken = CancelToken();
+
     try {
       final result = await callWithContext(
         ipAddress,
@@ -685,7 +725,11 @@ class RealApiService implements IApiService {
         method: 'scan',
         params: {'device': device},
         context: context,
+        // iwinfo scan can take 15-30+ seconds on real hardware
+        receiveTimeout: const Duration(seconds: 120),
+        cancelToken: _scanCancelToken,
       );
+      _scanCancelToken = null;
       // Handle LuCI RPC format: [status, data]
       if (result is List && result.length > 1 && result[0] == 0) {
         final data = result[1];
@@ -695,6 +739,12 @@ class RealApiService implements IApiService {
               .toList();
         }
       }
+      return [];
+    } on DioException catch (e) {
+      if (e.type == DioExceptionType.cancel) {
+        return []; // User cancelled
+      }
+      Logger.exception('Failed to scan wireless networks', e, e.stackTrace);
       return [];
     } catch (e, stack) {
       Logger.exception('Failed to scan wireless networks', e, stack);
