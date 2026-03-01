@@ -716,6 +716,8 @@ class RealApiService implements IApiService {
     cancelScan();
     _scanCancelToken = CancelToken();
 
+    Logger.info('WiFi scan starting on device: $device');
+
     try {
       final result = await callWithContext(
         ipAddress,
@@ -730,25 +732,80 @@ class RealApiService implements IApiService {
         cancelToken: _scanCancelToken,
       );
       _scanCancelToken = null;
-      // Handle LuCI RPC format: [status, data]
-      if (result is List && result.length > 1 && result[0] == 0) {
+
+      Logger.info('WiFi scan raw result type: ${result.runtimeType}');
+
+      // Parse result — handle multiple response formats
+      if (result is List) {
+        final statusCode = result.isNotEmpty ? result[0] : null;
+
+        // Check for ubus error codes
+        if (statusCode != null && statusCode != 0) {
+          const ubusErrors = {
+            1: 'Invalid command',
+            2: 'Invalid argument',
+            3: 'Method not found',
+            4: 'Not found',
+            5: 'No data',
+            6: 'Permission denied',
+            7: 'Request timed out',
+          };
+          final errMsg = ubusErrors[statusCode] ?? 'Unknown error';
+          throw Exception(
+              'iwinfo scan failed: $errMsg (code $statusCode) on device "$device"');
+        }
+
+        if (result.length < 2 || result[1] == null) {
+          // Success but no data — genuinely no networks found
+          return [];
+        }
+
         final data = result[1];
-        if (data is Map && data['results'] is List) {
-          return (data['results'] as List)
+
+        // Format 1: {"results": [{...}, {...}]} — standard iwinfo response
+        if (data is Map) {
+          if (data['results'] is List) {
+            return (data['results'] as List)
+                .whereType<Map<String, dynamic>>()
+                .toList();
+          }
+          // Format 2: Map but no 'results' key — try all list values
+          for (final value in data.values) {
+            if (value is List && value.isNotEmpty && value.first is Map) {
+              return value
+                  .whereType<Map<String, dynamic>>()
+                  .toList();
+            }
+          }
+          Logger.warning(
+              'WiFi scan: response is Map but no results. Keys: ${data.keys.toList()}');
+          return [];
+        }
+
+        // Format 3: [{...}, {...}] — results directly as array
+        if (data is List) {
+          return data
               .whereType<Map<String, dynamic>>()
               .toList();
         }
+
+        Logger.warning(
+            'WiFi scan: unexpected data type: ${data.runtimeType}');
+        return [];
       }
+
+      Logger.warning('WiFi scan: result is not List: ${result.runtimeType}');
       return [];
     } on DioException catch (e) {
       if (e.type == DioExceptionType.cancel) {
-        return []; // User cancelled
+        return []; // User cancelled — not an error
       }
-      Logger.exception('Failed to scan wireless networks', e, e.stackTrace);
-      return [];
-    } catch (e, stack) {
-      Logger.exception('Failed to scan wireless networks', e, stack);
-      return [];
+      if (e.type == DioExceptionType.receiveTimeout) {
+        throw Exception(
+            'Scan timed out on "$device". The radio may be busy.');
+      }
+      Logger.exception('WiFi scan DioException', e, e.stackTrace);
+      rethrow;
     }
   }
 
