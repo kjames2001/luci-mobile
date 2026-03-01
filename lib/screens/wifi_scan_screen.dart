@@ -15,8 +15,9 @@ class _WifiScanScreenState extends ConsumerState<WifiScanScreen>
     with SingleTickerProviderStateMixin {
   List<WifiScanResult> _scanResults = [];
   bool _isScanning = false;
+  bool _isRestarting = false;
   String? _error;
-  String? _selectedDevice;
+  String? _selectedRadio; // radioName key (e.g., 'radio0')
   List<Map<String, String>> _radioDevices = [];
   late AnimationController _pulseController;
 
@@ -44,13 +45,24 @@ class _WifiScanScreenState extends ConsumerState<WifiScanScreen>
     setState(() {
       _radioDevices = devices;
       if (devices.isNotEmpty) {
-        _selectedDevice = devices.first['ifname'];
+        _selectedRadio = devices.first['radioName'];
       }
     });
   }
 
+  /// Get the interface name to use for scanning based on selected radio
+  String? get _selectedIfname {
+    if (_selectedRadio == null) return null;
+    final device = _radioDevices.firstWhere(
+      (d) => d['radioName'] == _selectedRadio,
+      orElse: () => {},
+    );
+    return device['ifname'];
+  }
+
   Future<void> _startScan() async {
-    if (_selectedDevice == null) return;
+    final ifname = _selectedIfname;
+    if (ifname == null) return;
 
     setState(() {
       _isScanning = true;
@@ -62,7 +74,7 @@ class _WifiScanScreenState extends ConsumerState<WifiScanScreen>
     try {
       final appState = ref.read(appStateProvider);
       final results = await appState.scanWirelessNetworks(
-        device: _selectedDevice!,
+        device: ifname,
         context: context,
       );
 
@@ -81,8 +93,75 @@ class _WifiScanScreenState extends ConsumerState<WifiScanScreen>
         _error = 'Scan failed: $e';
       });
     }
+    if (mounted) {
+      _pulseController.stop();
+      _pulseController.reset();
+    }
+  }
+
+  void _stopScan() {
+    final appState = ref.read(appStateProvider);
+    appState.cancelWirelessScan();
+    setState(() {
+      _isScanning = false;
+    });
     _pulseController.stop();
     _pulseController.reset();
+  }
+
+  Future<void> _restartRadio() async {
+    if (_selectedRadio == null || _isRestarting) return;
+
+    setState(() {
+      _isRestarting = true;
+      _error = null;
+    });
+
+    try {
+      final appState = ref.read(appStateProvider);
+      final success = await appState.restartWirelessRadio(
+        _selectedRadio!,
+        context: context,
+      );
+
+      if (!mounted) return;
+      setState(() => _isRestarting = false);
+
+      if (success) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.check_circle, color: Colors.white, size: 20),
+                const SizedBox(width: 8),
+                Text('$_selectedRadio restarted'),
+              ],
+            ),
+            backgroundColor: Colors.green.shade700,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+        _loadRadioDevices();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Failed to restart radio'),
+            backgroundColor: Theme.of(context).colorScheme.error,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isRestarting = false;
+        _error = 'Restart failed: $e';
+      });
+    }
   }
 
   void _showConnectDialog(WifiScanResult network) {
@@ -96,7 +175,7 @@ class _WifiScanScreenState extends ConsumerState<WifiScanScreen>
       builder: (context) => _ConnectBottomSheet(
         network: network,
         radioDevices: _radioDevices,
-        selectedDevice: _selectedDevice,
+        selectedDevice: _selectedRadio,
       ),
     );
   }
@@ -148,89 +227,154 @@ class _WifiScanScreenState extends ConsumerState<WifiScanScreen>
           ),
         ],
       ),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          // Radio device selector
-          Expanded(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: colorScheme.outline.withValues(alpha: 0.3),
-                ),
-                color: colorScheme.surfaceContainerLow,
+          // Radio device selector (full width)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: colorScheme.outline.withValues(alpha: 0.3),
               ),
-              child: DropdownButtonHideUnderline(
-                child: DropdownButton<String>(
-                  value: _selectedDevice,
-                  isExpanded: true,
-                  icon: Icon(
-                    Icons.arrow_drop_down,
+              color: colorScheme.surfaceContainerLow,
+            ),
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: _selectedRadio,
+                isExpanded: true,
+                icon: Icon(
+                  Icons.arrow_drop_down,
+                  color: colorScheme.onSurfaceVariant,
+                ),
+                hint: Text(
+                  'Select radio',
+                  style: theme.textTheme.bodyMedium?.copyWith(
                     color: colorScheme.onSurfaceVariant,
                   ),
-                  hint: Text(
-                    'Select radio',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                  items: _radioDevices.map((device) {
-                    return DropdownMenuItem<String>(
-                      value: device['ifname'],
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.router,
-                            size: 18,
-                            color: colorScheme.primary,
-                          ),
-                          const SizedBox(width: 8),
-                          Flexible(
-                            child: Text(
-                              '${device['ifname']} (${device['ssid']})',
-                              overflow: TextOverflow.ellipsis,
-                              style: theme.textTheme.bodyMedium,
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  }).toList(),
-                  onChanged: _isScanning
-                      ? null
-                      : (value) {
-                          setState(() {
-                            _selectedDevice = value;
-                          });
-                        },
                 ),
+                items: _radioDevices.map((device) {
+                  final radioName = device['radioName'] ?? '';
+                  final ssid = device['ssid'] ?? '';
+                  final band = device['band'] ?? '';
+                  final label = band.isNotEmpty
+                      ? '$radioName ($band)'
+                      : radioName;
+                  final subtitle = ssid != radioName && ssid.isNotEmpty
+                      ? ssid
+                      : null;
+                  return DropdownMenuItem<String>(
+                    value: radioName,
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.router,
+                          size: 18,
+                          color: colorScheme.primary,
+                        ),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                label,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodyMedium,
+                              ),
+                              if (subtitle != null)
+                                Text(
+                                  subtitle,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList(),
+                onChanged: (_isScanning || _isRestarting)
+                    ? null
+                    : (value) {
+                        setState(() {
+                          _selectedRadio = value;
+                        });
+                      },
               ),
             ),
           ),
-          const SizedBox(width: 12),
-          // Scan button
-          FilledButton.icon(
-            onPressed: _isScanning || _selectedDevice == null
-                ? null
-                : _startScan,
-            icon: _isScanning
-                ? SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: colorScheme.onPrimary,
-                    ),
-                  )
-                : const Icon(Icons.radar, size: 20),
-            label: Text(_isScanning ? 'Scanning' : 'Scan'),
-            style: FilledButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
+          const SizedBox(height: 10),
+          // Scan + Restart Radio buttons row
+          Row(
+            children: [
+              // Scan / Stop button
+              Expanded(
+                child: _isScanning
+                    ? OutlinedButton.icon(
+                        onPressed: _stopScan,
+                        icon: const Icon(Icons.stop, size: 20),
+                        label: const Text('Stop Scan'),
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          foregroundColor: colorScheme.error,
+                          side: BorderSide(
+                            color: colorScheme.error.withValues(alpha: 0.5),
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      )
+                    : FilledButton.icon(
+                        onPressed: _isRestarting || _selectedRadio == null
+                            ? null
+                            : _startScan,
+                        icon: const Icon(Icons.radar, size: 20),
+                        label: const Text('Scan Networks'),
+                        style: FilledButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
               ),
-            ),
+              const SizedBox(width: 10),
+              // Restart Radio button
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _isScanning || _isRestarting || _selectedRadio == null
+                      ? null
+                      : _restartRadio,
+                  icon: _isRestarting
+                      ? SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: colorScheme.primary,
+                          ),
+                        )
+                      : const Icon(Icons.restart_alt, size: 20),
+                  label: Text(_isRestarting ? 'Restarting...' : 'Restart Radio'),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    side: BorderSide(
+                      color: colorScheme.primary.withValues(alpha: 0.5),
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -653,12 +797,10 @@ class _ConnectBottomSheetState extends ConsumerState<_ConnectBottomSheet> {
     super.initState();
     // Default to the radio that was used for scanning
     if (widget.selectedDevice != null && widget.radioDevices.isNotEmpty) {
-      // Find the radioName for the selected device
-      final matchingDevice = widget.radioDevices.firstWhere(
-        (d) => d['ifname'] == widget.selectedDevice,
-        orElse: () => widget.radioDevices.first,
-      );
-      _selectedRadio = matchingDevice['radioName'];
+      // selectedDevice is now a radioName directly
+      _selectedRadio = widget.selectedDevice;
+    } else if (widget.radioDevices.isNotEmpty) {
+      _selectedRadio = widget.radioDevices.first['radioName'];
     }
   }
 
@@ -871,10 +1013,15 @@ class _ConnectBottomSheetState extends ConsumerState<_ConnectBottomSheet> {
                       color: colorScheme.onSurfaceVariant,
                     ),
                     items: widget.radioDevices.map((device) {
+                      final radioName = device['radioName'] ?? '';
+                      final band = device['band'] ?? '';
+                      final label = band.isNotEmpty
+                          ? '$radioName ($band)'
+                          : radioName;
                       return DropdownMenuItem<String>(
                         value: device['radioName'],
                         child: Text(
-                          '${device['radioName']} (${device['ifname']})',
+                          label,
                           style: theme.textTheme.bodyMedium,
                         ),
                       );
