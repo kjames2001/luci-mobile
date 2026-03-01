@@ -1279,7 +1279,7 @@ class AppState extends ChangeNotifier {
   }
 
   /// Scans for nearby wireless networks on a given radio interface.
-  /// [device] is the wireless device name (e.g., 'wlan0', 'wlan1').
+  /// [device] is the wireless device name (e.g., 'wlan0', 'phy0-ap0').
   Future<List<WifiScanResult>> scanWirelessNetworks({
     required String device,
     BuildContext? context,
@@ -1298,7 +1298,7 @@ class AppState extends ChangeNotifier {
     }
 
     if (_authService?.sysauth == null || _authService?.ipAddress == null) {
-      return [];
+      throw Exception('Not authenticated');
     }
 
     try {
@@ -1309,13 +1309,34 @@ class AppState extends ChangeNotifier {
         device: device,
         context: context,
       );
+
+      if (results.isEmpty) {
+        // Try with phy name (strip -ap0, -sta0 suffix) as fallback
+        final phyMatch = RegExp(r'^(phy\d+)-').firstMatch(device);
+        if (phyMatch != null) {
+          final phyName = phyMatch.group(1)!;
+          Logger.info('Scan returned empty on $device, retrying with $phyName');
+          final retryResults = await _apiService!.scanWirelessNetworks(
+            ipAddress: _authService!.ipAddress!,
+            sysauth: _authService!.sysauth!,
+            useHttps: _authService!.useHttps,
+            device: phyName,
+            context: context,
+          );
+          if (retryResults.isNotEmpty) {
+            return retryResults.map((r) => WifiScanResult.fromJson(r)).toList()
+              ..sort((a, b) => b.signal.compareTo(a.signal));
+          }
+        }
+      }
+
       final scanResults =
           results.map((r) => WifiScanResult.fromJson(r)).toList()
             ..sort((a, b) => b.signal.compareTo(a.signal));
       return scanResults;
     } catch (e, stack) {
       Logger.exception('Failed to scan wireless networks', e, stack);
-      return [];
+      rethrow; // Let the UI show the actual error
     }
   }
 
@@ -1517,6 +1538,8 @@ class AppState extends ChangeNotifier {
     }
 
     try {
+      Logger.info('Toggle interface $uciSection → ${enabled ? 'enabled' : 'disabled'}');
+
       await _apiService!.uciSet(
         _authService!.ipAddress!,
         _authService!.sysauth!,
@@ -1526,6 +1549,7 @@ class AppState extends ChangeNotifier {
         values: {'disabled': enabled ? '0' : '1'},
         context: context,
       );
+      Logger.info('UCI set done');
 
       await _apiService!.uciCommit(
         _authService!.ipAddress!,
@@ -1534,16 +1558,19 @@ class AppState extends ChangeNotifier {
         config: 'wireless',
         context: context?.mounted == true ? context : null,
       );
-
-      await _wifiReload(context: context);
-
-      return true;
+      Logger.info('UCI commit done');
     } catch (e, stack) {
-      Logger.exception('Failed to toggle wireless interface', e, stack);
+      // UCI operations failed — actual error
+      Logger.exception('Failed to toggle wireless interface (UCI)', e, stack);
       _dashboardError = 'Failed to toggle interface: $e';
       notifyListeners();
       return false;
     }
+
+    // UCI changes are committed — reload wifi in background (best-effort)
+    await _wifiReload(context: context);
+    Logger.info('Toggle interface $uciSection complete');
+    return true;
   }
 
   /// Modifies properties of an existing wifi-iface UCI section.
