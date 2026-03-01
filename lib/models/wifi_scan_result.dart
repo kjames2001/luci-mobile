@@ -106,14 +106,72 @@ class WifiEncryption {
   });
 
   factory WifiEncryption.fromJson(Map<String, dynamic> json) {
+    // 'wpa' can be int (e.g., 2) or List<int> (e.g., [2] or [1,2])
+    int wpaVersion = 0;
+    final rawWpa = json['wpa'];
+    if (rawWpa is int) {
+      wpaVersion = rawWpa;
+    } else if (rawWpa is List && rawWpa.isNotEmpty) {
+      // Take the highest WPA version from the array
+      wpaVersion = rawWpa
+          .whereType<int>()
+          .fold(0, (max, v) => v > max ? v : max);
+      if (wpaVersion == 0) {
+        // Try parsing from dynamic types
+        for (final v in rawWpa) {
+          final parsed = WifiScanResult._safeInt(v, 0);
+          if (parsed > wpaVersion) wpaVersion = parsed;
+        }
+      }
+    }
+
+    final wep = json['wep'] == true;
+    final enabled = json['enabled'] == true || wpaVersion > 0 || wep;
+
+    // Auth suites: try multiple key names used by different OpenWrt versions
+    final authSuites = _toStringList(json['auth_suites'])
+        + _toStringList(json['authentication']);
+
+    // Ciphers: try multiple key names
+    final pairCiphers = _toStringList(json['pair_ciphers'])
+        + _toStringList(json['ciphers']);
+    final groupCiphers = _toStringList(json['group_ciphers']);
+
+    // Build description from available data if not provided
+    String description;
+    final rawDesc = json['description'];
+    if (rawDesc is String && rawDesc.isNotEmpty) {
+      description = rawDesc;
+    } else if (!enabled) {
+      description = 'None';
+    } else if (wep) {
+      description = 'WEP';
+    } else {
+      // Build from wpa version + auth + ciphers
+      final wpaPart = wpaVersion >= 3
+          ? 'WPA3'
+          : wpaVersion >= 2
+              ? 'WPA2'
+              : wpaVersion >= 1
+                  ? 'WPA'
+                  : 'WPA';
+      final authPart = authSuites.isNotEmpty
+          ? ' ${authSuites.map((s) => s.toUpperCase()).join("/")}'
+          : '';
+      final cipherPart = pairCiphers.isNotEmpty
+          ? ' (${pairCiphers.map((s) => s.toUpperCase()).join(", ")})'
+          : '';
+      description = '$wpaPart$authPart$cipherPart';
+    }
+
     return WifiEncryption(
-      enabled: json['enabled'] == true,
-      description: WifiScanResult._safeString(json['description'], 'None'),
-      wep: json['wep'] == true,
-      wpa: WifiScanResult._safeInt(json['wpa'], 0),
-      authSuites: _toStringList(json['auth_suites']),
-      pairCiphers: _toStringList(json['pair_ciphers']),
-      groupCiphers: _toStringList(json['group_ciphers']),
+      enabled: enabled,
+      description: description,
+      wep: wep,
+      wpa: wpaVersion,
+      authSuites: authSuites,
+      pairCiphers: pairCiphers,
+      groupCiphers: groupCiphers,
     );
   }
 
