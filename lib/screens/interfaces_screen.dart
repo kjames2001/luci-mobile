@@ -421,8 +421,8 @@ class _InterfacesScreenState extends ConsumerState<InterfacesScreen> {
                                     ),
                                   );
                                 },
-                                icon: Icon(Icons.radar, size: 16),
-                                label: Text('Scan'),
+                                icon: Icon(Icons.cell_tower, size: 16),
+                                label: Text('Radio'),
                                 style: TextButton.styleFrom(
                                   padding: const EdgeInsets.symmetric(
                                     horizontal: 12,
