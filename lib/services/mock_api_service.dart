@@ -1034,10 +1034,11 @@ class MockApiService implements IApiService {
     required String config,
     required String type,
     required Map<String, dynamic> values,
+    String? name,
     BuildContext? context,
   }) async {
     await Future.delayed(const Duration(milliseconds: 300));
-    return [0, 'cfg_new_section'];
+    return [0, name ?? 'cfg_new_section'];
   }
 
   @override
@@ -1073,4 +1074,7 @@ class MockApiService implements IApiService {
       context: context,
     );
   }
+
+  @override
+  void cancelScan() {}
 }
