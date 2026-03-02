@@ -1494,7 +1494,7 @@ class AppState extends ChangeNotifier {
     required String ssid,
     required String encryption,
     String password = '',
-    String networkName = 'wwan',
+    String? bssid,
     BuildContext? context,
   }) async {
     if (_reviewerModeEnabled) {
@@ -1512,8 +1512,15 @@ class AppState extends ChangeNotifier {
       final auth = _authService!.sysauth!;
       final https = _authService!.useHttps;
 
-      // Find next available wifinet# name to avoid anonymous sections
+      // Use radio-specific network name to avoid conflicts between radios
+      // radio0 -> wwan, radio1 -> wwan1, radio2 -> wwan2, etc
+      final radioIndex = int.tryParse(radioDevice.replaceAll('radio', '')) ?? 0;
+      final staNetworkName = radioIndex == 0 ? 'wwan' : 'wwan$radioIndex';
+
+      // Find next available wifinet# name properly
       String sectionName = 'wifinet0';
+      bool existingStaUpdated = false;
+      
       try {
         final uciResult = await _apiService!.uciGetAll(
           ip, auth, https,
@@ -1521,46 +1528,173 @@ class AppState extends ChangeNotifier {
           context: context,
         );
         if (uciResult is List && uciResult.length > 1 && uciResult[1] is Map) {
-          final sections = (uciResult[1] as Map).keys.toSet();
-          int idx = 0;
-          while (sections.contains('wifinet$idx')) {
-            idx++;
+          final wirelessConfig = uciResult[1] as Map<String, dynamic>;
+          final sections = wirelessConfig.keys.toSet();
+
+          // Find existing STA on this radio - if exists, update it
+          String? existingStaOnThisRadio;
+          for (final sectionKey in sections) {
+            final section = wirelessConfig[sectionKey];
+            if (section is Map<String, dynamic>) {
+              final device = section['device']?.toString();
+              final mode = section['mode']?.toString();
+              if (device == radioDevice && mode == 'sta') {
+                existingStaOnThisRadio = sectionKey.toString();
+                break;
+              }
+            }
           }
-          sectionName = 'wifinet$idx';
+
+          if (existingStaOnThisRadio != null) {
+            // Found existing STA on this radio - update it
+            Logger.info('Found existing STA on $radioDevice, updating section $existingStaOnThisRadio');
+            await _apiService!.uciSet(
+              ip, auth, https,
+              config: 'wireless',
+              section: existingStaOnThisRadio,
+              values: {
+                'network': staNetworkName,
+                'ssid': ssid,
+                'encryption': encryption,
+                if (password.isNotEmpty) 'key': password,
+                if (bssid != null && bssid.isNotEmpty) 'bssid': bssid,
+              },
+              context: context,
+            );
+            existingStaUpdated = true;
+            sectionName = existingStaOnThisRadio;
+          } else {
+            // No existing STA on this radio - create new with proper wifinet#
+            Logger.info('No existing STA on $radioDevice, creating new section');
+            int maxIdx = -1;
+            for (final key in sections) {
+              if (key.toString().startsWith('wifinet')) {
+                final numStr = key.toString().replaceAll('wifinet', '');
+                final num = int.tryParse(numStr);
+                if (num != null && num > maxIdx) {
+                  maxIdx = num;
+                }
+              }
+            }
+            sectionName = 'wifinet${maxIdx + 1}';
+            Logger.info('Selected new section name: $sectionName (max was $maxIdx)');
+          }
         }
       } catch (e) {
-        Logger.warning('Could not query existing sections, using $sectionName: $e');
+        Logger.warning('Could not query existing sections: $e');
       }
 
-      Logger.info('Creating named wifi-iface section: $sectionName');
+      // If we didn't update an existing STA, create new one
+      if (!existingStaUpdated) {
+        Logger.info('Creating new wifi-iface section: $sectionName with network: $staNetworkName');
 
-      // Build the values for the new wifi-iface
-      final values = <String, dynamic>{
-        'device': radioDevice,
-        'network': networkName,
-        'mode': 'sta',
-        'ssid': ssid,
-        'encryption': encryption,
-      };
-      if (password.isNotEmpty) {
-        values['key'] = password;
+        final values = <String, dynamic>{
+          'device': radioDevice,
+          'network': staNetworkName,
+          'mode': 'sta',
+          'ssid': ssid,
+          'encryption': encryption,
+        };
+        if (password.isNotEmpty) {
+          values['key'] = password;
+        }
+        if (bssid != null && bssid.isNotEmpty) {
+          values['bssid'] = bssid;
+        }
+
+        // 1. Add a named wifi-iface section
+        final addResult = await _apiService!.uciAdd(
+          ip,
+          auth,
+          https,
+          config: 'wireless',
+          type: 'wifi-iface',
+          name: sectionName,
+          values: values,
+          context: context,
+        );
+
+        Logger.info('UCI add result: $addResult');
+
+        // 2. Create network interface if needed (for wwan1, wwan2, etc.)
+        if (staNetworkName != 'wwan') {
+          try {
+            await _apiService!.uciAdd(
+              ip, auth, https,
+              config: 'network',
+              type: 'interface',
+              name: staNetworkName,
+              values: {'proto': 'dhcp'},
+              context: context,
+            );
+            Logger.info('Created network interface: $staNetworkName');
+          } catch (e) {
+            Logger.warning('Network interface may already exist: $e');
+          }
+        }
+        
+        // 3. Add to firewall WAN zone if not already there
+        try {
+          final firewallResult = await _apiService!.uciGetAll(
+            ip, auth, https,
+            config: 'firewall',
+            context: context,
+          );
+          bool foundInWan = false;
+          int wanZoneIndex = -1;
+          if (firewallResult is List && firewallResult.length > 1 && firewallResult[1] is Map) {
+            final firewallConfig = firewallResult[1] as Map<String, dynamic>;
+            int zoneIndex = 0;
+            for (final key in firewallConfig.keys) {
+              final section = firewallConfig[key];
+              if (section is Map<String, dynamic>) {
+                final typeName = section['.type']?.toString() ?? key.toString().split('@').first;
+                // Check if this is a zone section
+                if (typeName == 'zone' || (section.containsKey('name') && section.containsKey('input'))) {
+                  final zoneName = section['name']?.toString();
+                  if (zoneName == 'wan') {
+                    wanZoneIndex = zoneIndex;
+                    // Check if network is already in this zone
+                    final networks = section['network'];
+                    if (networks is String && networks == staNetworkName) {
+                      foundInWan = true;
+                      break;
+                    } else if (networks is String && networks.contains(staNetworkName)) {
+                      foundInWan = true;
+                      break;
+                    } else if (networks is List && networks.contains(staNetworkName)) {
+                      foundInWan = true;
+                      break;
+                    }
+                  }
+                  zoneIndex++;
+                }
+              }
+            }
+          }
+
+          if (!foundInWan && wanZoneIndex >= 0) {
+            // Use system command to add network to wan zone
+            // The systemExec splits by whitespace, so we pass each part separately
+            await _apiService!.systemExec(
+              ip, auth, https,
+              command: "uci add_list firewall.@zone[$wanZoneIndex].network=$staNetworkName",
+              context: context,
+            );
+            // Commit firewall changes
+            await _apiService!.uciCommit(
+              ip, auth, https,
+              config: 'firewall',
+              context: context,
+            );
+            Logger.info('Added $staNetworkName to WAN firewall zone at index $wanZoneIndex');
+          }
+        } catch (e) {
+          Logger.warning('Failed to add to firewall zone: $e');
+        }
       }
 
-      // 1. Add a named wifi-iface section
-      final addResult = await _apiService!.uciAdd(
-        ip,
-        auth,
-        https,
-        config: 'wireless',
-        type: 'wifi-iface',
-        name: sectionName,
-        values: values,
-        context: context,
-      );
-
-      Logger.info('UCI add result: $addResult');
-
-      // 2. Commit wireless configuration
+      // 4. Commit wireless configuration
       await _apiService!.uciCommit(
         ip,
         auth,
@@ -1569,7 +1703,27 @@ class AppState extends ChangeNotifier {
         context: context?.mounted == true ? context : null,
       );
 
-      // 3. Restart radio to apply changes
+      // 5. Commit network and firewall configuration
+      try {
+        await _apiService!.uciCommit(
+          ip, auth, https,
+          config: 'network',
+          context: context?.mounted == true ? context : null,
+        );
+      } catch (e) {
+        Logger.warning('Network commit failed: $e');
+      }
+      try {
+        await _apiService!.uciCommit(
+          ip, auth, https,
+          config: 'firewall',
+          context: context?.mounted == true ? context : null,
+        );
+      } catch (e) {
+        Logger.warning('Firewall commit failed: $e');
+      }
+
+      // 6. Restart radio to apply changes
       await _restartRadioViaUci(radioDevice, context: context);
 
       return true;
@@ -1688,11 +1842,13 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Deletes a wifi-iface UCI section and reloads wifi.
+  /// Deletes a wifi-iface UCI section.
   ///
   /// [uciSection] is the UCI section name to remove.
+  /// [mode] is the interface mode ('ap' or 'sta') - if 'ap', WiFi will reload.
   Future<bool> deleteWirelessInterface(
     String uciSection, {
+    String mode = 'ap',
     BuildContext? context,
   }) async {
     if (_reviewerModeEnabled) {
@@ -1723,7 +1879,19 @@ class AppState extends ChangeNotifier {
         context: context?.mounted == true ? context : null,
       );
 
-      await _wifiReload(context: context);
+      // Only reload WiFi for AP mode - STA deletion doesn't require radio restart
+      if (mode.toLowerCase().contains('sta') || 
+          mode.toLowerCase().contains('client') ||
+          mode.toLowerCase() == 'station') {
+        // STA mode - just refresh data, no radio restart
+        await Future.delayed(const Duration(seconds: 2));
+        try {
+          await fetchDashboardData();
+        } catch (_) {}
+      } else {
+        // AP mode - restart WiFi
+        await _wifiReload(context: context);
+      }
 
       return true;
     } catch (e, stack) {

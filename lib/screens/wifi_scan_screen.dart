@@ -847,6 +847,7 @@ class _ConnectBottomSheetState extends ConsumerState<_ConnectBottomSheet> {
       ssid: widget.network.ssid,
       encryption: widget.network.encryption.openwrtEncryption,
       password: _passwordController.text,
+      bssid: widget.network.bssid,
       context: context,
     );
 
